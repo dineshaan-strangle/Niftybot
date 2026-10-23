@@ -3,7 +3,8 @@ import time
 import pyotp
 import requests
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+IST = timezone(timedelta(hours=5, minutes=30))
 from SmartApi.smartConnect import SmartConnect
 
 # ========== ENV - RENDER LA SET PANNIRUKEENGA ==========
@@ -125,7 +126,7 @@ class NiftyBot:
 
         while True:
             try:
-                now = datetime.now()
+                now = datetime.now(IST)
 
                 # Market Time Check IST
                 if now.hour < 9 or (now.hour == 15 and now.minute >= 31):
