@@ -4,8 +4,20 @@ import pyotp
 import requests
 import logging
 import math
+import threading
+from flask import Flask
 from datetime import datetime, timezone, timedelta
 from SmartApi.smartConnect import SmartConnect
+
+# ========== RENDER PORT FIX - ITHU THAN MAIN FIX ==========
+app = Flask(__name__)
+@app.route('/')
+def home():
+    return f"Nifty Bot Running OK - ORB Logic Active - {datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime('%H:%M:%S')} IST"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
 
 # ========== IST FIX ==========
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -97,14 +109,11 @@ class NiftyBot:
             return None
 
     def mark_orb(self):
-        # 1. Mark high and low of first 5 min candle (9:15-9:20) - NIFTY FUTURES
-        # NOTE: Using NIFTY SPOT token 99926000 as proxy. Live la Nifty Futures token maathu
         now = datetime.now(IST)
         from_str = now.strftime("%Y-%m-%d 09:15")
         to_str = now.strftime("%Y-%m-%d 09:20")
         candles = self.get_candle_data("NSE", "99926000", "FIVE_MINUTE", from_str, to_str)
         if candles:
-            # candles format: [timestamp, open, high, low, close, volume]
             self.orb_high = float(max([c[2] for c in candles]))
             self.orb_low = float(min([c[3] for c in candles]))
             logger.info(f"📦 ORB MARKED H:{self.orb_high} L:{self.orb_low}")
@@ -144,7 +153,6 @@ class NiftyBot:
             try:
                 now = datetime.now(IST)
                 
-                # Reset daily
                 if now.date() != self.last_date:
                     self.orb_high = None
                     self.orb_low = None
@@ -152,7 +160,6 @@ class NiftyBot:
                     self.traded_today = False
                     self.last_date = now.date()
 
-                # Market closed
                 if now.hour < 9 or (now.hour == 15 and now.minute >= 16):
                     if now.hour == 15 and now.minute >= 15 and not self.traded_today and self.trade_count>0:
                         send_telegram(f"⏰ <b>3:15 Auto Square Off</b> - Day Over")
@@ -164,7 +171,6 @@ class NiftyBot:
                     time.sleep(10)
                     continue
 
-                # 1. MARK ORB at 9:20
                 if self.orb_high is None and now.hour == 9 and now.minute >= 20:
                     self.mark_orb()
                     time.sleep(5)
@@ -178,7 +184,6 @@ class NiftyBot:
                     time.sleep(60)
                     continue
 
-                # 2. Switch to 3 minute timeframe
                 from_str = now.strftime("%Y-%m-%d 09:15")
                 to_str = now.strftime("%Y-%m-%d %H:%M")
                 candles_3m = self.get_candle_data("NSE", "99926000", "THREE_MINUTE", from_str, to_str)
@@ -189,42 +194,34 @@ class NiftyBot:
 
                 last_candle = candles_3m[-1]
                 close = float(last_candle[4])
-                breakout_low = float(last_candle[3]) # low of breakout candle
-                breakdown_low = float(last_candle[3]) # EXACT AS PER YOUR LOGIC - low for PE also
+                breakout_low = float(last_candle[3])
+                breakdown_low = float(last_candle[3])
                 breakout_high = float(last_candle[2])
 
-                # 3. CE Logic
                 if close > self.orb_high:
                     spot = close
                     strike, delta = self.find_delta_strike(spot, "CE")
                     risk = close - breakout_low
                     tp = close + (risk * TP_RR)
                     sl = breakout_low
-                    
                     msg = f"🚀 <b>CE BREAKOUT (3min)</b>\nSpot: {spot} > ORB H: {self.orb_high}\nBuy CE: {strike} Delta: {delta:.2f}\nSL: {sl} (Low of breakout)\nTP: {tp} (1:1.5 RR)\nTrade: {self.trade_count+1}/{MAX_TRADES}"
                     logger.info(msg)
                     send_telegram(msg)
-                    
-                    # self.place_order(f"NIFTY...{strike}CE", "token", "BUY", LOT_SIZE)
                     self.trade_count += 1
                     if self.trade_count >= MAX_TRADES:
                         self.traded_today = True
                     time.sleep(60)
                     continue
 
-                # 4. PE Logic - EXACT AS YOU SAID - SL = LOW of breakdown
                 elif close < self.orb_low:
                     spot = close
                     strike, delta = self.find_delta_strike(spot, "PE")
-                    risk = breakout_high - close # using high-low of breakdown candle as risk, but SL as low per your logic
+                    risk = breakout_high - close
                     tp = close - (risk * TP_RR)
-                    sl = breakdown_low # EXACT - low of breakdown candle
-
-                    msg = f"🔻 <b>PE BREAKDOWN (3min)</b>\nSpot: {spot} < ORB L: {self.orb_low}\nBuy PE: {strike} Delta: {delta:.2f}\nSL: {sl} (Low of breakdown - as per logic)\nTP: {tp} (1:1.5 RR)\nTrade: {self.trade_count+1}/{MAX_TRADES}"
+                    sl = breakdown_low
+                    msg = f"🔻 <b>PE BREAKDOWN (3min)</b>\nSpot: {spot} < ORB L: {self.orb_low}\nBuy PE: {strike} Delta: {delta:.2f}\nSL: {sl} (Low of breakdown - exact logic)\nTP: {tp} (1:1.5 RR)\nTrade: {self.trade_count+1}/{MAX_TRADES}"
                     logger.info(msg)
                     send_telegram(msg)
-
-                    # self.place_order(f"NIFTY...{strike}PE", "token", "BUY", LOT_SIZE)
                     self.trade_count += 1
                     if self.trade_count >= MAX_TRADES:
                         self.traded_today = True
@@ -238,5 +235,10 @@ class NiftyBot:
                 time.sleep(10)
 
 if __name__ == "__main__":
+    # RENDER FIX
+    t = threading.Thread(target=run_web)
+    t.daemon = True
+    t.start()
+    logger.info(f"✅ Web server started on port {os.environ.get('PORT', 10000)} - Render port error fixed")
     bot = NiftyBot()
     bot.run()
