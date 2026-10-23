@@ -57,7 +57,7 @@ def telegram_listener():
                 if not text: continue
                 now=datetime.now(IST).strftime('%H:%M:%S')
                 if "/start" in text:
-                    send_telegram(f"👋 <b>Nifty FUT ORB Bot Ready</b>\n{now} {get_mode_text()}")
+                    send_telegram(f"👋 <b>Nifty FUT ORB Bot Ready</b>\n{now} {get_mode_text()}\nLogic: Futures 5min ORB -> 3min Breakout")
                 elif "/info" in text:
                     if bot_instance and bot_instance.orb_high is None:
                         bot_instance.mark_orb_futures()
@@ -71,8 +71,7 @@ def telegram_listener():
                 elif "/close" in text:
                     if bot_instance and bot_instance.active_pos: bot_instance.close_position("Manual /close")
                     else: send_telegram("📭 No position")
-        except Exception as e:
-            print(f"Listener error {e}"); time.sleep(5)
+        except: time.sleep(5)
 
 def calc_delta(spot, strike, time_to_expiry=3/365, vol=0.20, r=0.06, option_type="CE"):
     try:
@@ -81,25 +80,15 @@ def calc_delta(spot, strike, time_to_expiry=3/365, vol=0.20, r=0.06, option_type
         return N(d1) if option_type=="CE" else N(d1)-1
     except: return 0.5
 
-# Helper for searchScrip - fixed signature
 def search_scrip_safe(api, exchange, keyword):
     try:
-        # Correct signature: searchScrip(exchange, searchscrip)
         data = api.searchScrip(exchange, keyword)
-        if data and isinstance(data, dict) and data.get('data'):
-            return data
-        # Some versions return list directly
-        if isinstance(data, list):
-            return {"data": data}
+        if isinstance(data, dict) and data.get('data'): return data
+        if isinstance(data, list): return {"data": data}
         return data
     except Exception as e:
         logger.error(f"Search {keyword} error {e}")
-        try:
-            # Fallback try with single arg
-            data = api.searchScrip(keyword)
-            return data
-        except:
-            return None
+        return None
 
 class NiftyBot:
     def __init__(self):
@@ -111,16 +100,14 @@ class NiftyBot:
             self.smartApi=SmartConnect(api_key=API_KEY)
             totp=pyotp.TOTP(TOTP_SECRET).now()
             session=self.smartApi.generateSession(CLIENT_ID, MPIN, totp)
-            if not session['status']:
-                send_telegram(f"❌ Login Fail {session['message']}"); return False
+            if not session['status']: send_telegram(f"❌ Login Fail {session['message']}"); return False
             send_telegram(f"✅ Login {CLIENT_ID} {get_mode_text()}"); return True
         except Exception as e:
             logger.error(f"Login {e}"); return False
 
     def get_candle_data(self, exchange, symboltoken, interval, fromdate, todate):
         try:
-            params={"exchange": exchange, "symboltoken": symboltoken, "interval": interval, "fromdate": fromdate, "todate": todate}
-            data=self.smartApi.getCandleData(params)
+            data=self.smartApi.getCandleData({"exchange": exchange, "symboltoken": symboltoken, "interval": interval, "fromdate": fromdate, "todate": todate})
             return data['data'] if data and data.get('data') else []
         except: return []
 
@@ -133,23 +120,18 @@ class NiftyBot:
             fut_token=None; fut_symbol=None; exch="NFO"
             search = search_scrip_safe(self.smartApi, "NFO", "NIFTY FUT")
             if search and search.get('data'):
-                candidates=[]
-                for item in search['data']:
-                    ts=item.get('tradingsymbol','')
-                    if 'NIFTY' in ts and 'FUT' in ts and 'BANK' not in ts and 'FIN' not in ts and 'MIDCP' not in ts:
-                        candidates.append(item)
-                if candidates:
-                    candidates.sort(key=lambda x: x.get('tradingsymbol',''))
-                    fut_token=candidates[0]['symboltoken']
-                    fut_symbol=candidates[0]['tradingsymbol']
+                cands=[i for i in search['data'] if 'NIFTY' in i.get('tradingsymbol','') and 'FUT' in i.get('tradingsymbol','') and 'BANK' not in i.get('tradingsymbol','')]
+                if cands:
+                    cands.sort(key=lambda x: x.get('tradingsymbol',''))
+                    fut_token=cands[0]['symboltoken']; fut_symbol=cands[0]['tradingsymbol']
             if not fut_token:
                 fut_token="99926000"; fut_symbol="NIFTY SPOT (Fallback)"; exch="NSE"
             now=datetime.now(IST)
             candles=self.get_candle_data(exch, fut_token, "FIVE_MINUTE", now.strftime("%Y-%m-%d 09:15"), now.strftime("%Y-%m-%d 09:20"))
-            if candles and len(candles)>=1:
+            if candles:
                 self.orb_high=float(candles[0][2]); self.orb_low=float(candles[0][3])
                 self.fut_symbol=fut_symbol; self.fut_token=fut_token
-                send_telegram(f"📦 <b>ORB Marked</b>\nFut: {fut_symbol}\nHigh: {self.orb_high}\nLow: {self.orb_low}\n(9:15-9:20 5min)")
+                send_telegram(f"📦 <b>ORB Marked - LOGIC 1</b>\nFut: {fut_symbol}\nHigh: {self.orb_high}\nLow: {self.orb_low}\n(9:15-9:20 5min)")
                 return True
             else:
                 self.fut_symbol=fut_symbol; self.fut_token=fut_token
@@ -165,13 +147,19 @@ class NiftyBot:
             if abs(d) > 0.7: return strike, abs(d)
         return atm, 0.7
 
+    # FIXED: PAPER ku search illa
     def place_buy(self, strike, ce_pe):
         try:
+            if PAPER_TRADING:
+                symbol = f"NIFTY {strike} {ce_pe} (PAPER)"
+                token = "99926000"
+                logger.info(f"PAPER BUY {symbol}")
+                return symbol, token
+
             keyword = f"NIFTY {strike} {ce_pe}"
             search = search_scrip_safe(self.smartApi, "NFO", keyword)
             symbol=None; token=None
             if search and search.get('data'):
-                # Prefer weekly expiry
                 for item in search['data']:
                     ts=item.get('tradingsymbol','')
                     if str(strike) in ts and ce_pe in ts and 'NIFTY' in ts:
@@ -180,13 +168,11 @@ class NiftyBot:
                     symbol=search['data'][0]['tradingsymbol']; token=search['data'][0]['symboltoken']
             if not symbol:
                 send_telegram(f"❌ Symbol not found {keyword}"); return None, None
-            if PAPER_TRADING:
-                logger.info(f"PAPER BUY {symbol}"); return symbol, token
             orderparams={"variety": "NORMAL", "tradingsymbol": symbol, "symboltoken": token, "transactiontype": "BUY", "exchange": "NFO", "ordertype": "MARKET", "producttype": PRODUCT_TYPE, "duration": "DAY", "price": "0", "quantity": str(LOT_SIZE)}
             self.smartApi.placeOrder(orderparams)
             return symbol, token
         except Exception as e:
-            send_telegram(f"❌ Buy Fail {e}"); logger.error(f"Buy fail {e}"); return None, None
+            send_telegram(f"❌ Buy Fail {e}"); return None, None
 
     def close_position(self, reason):
         if not self.active_pos: return
@@ -195,7 +181,8 @@ class NiftyBot:
             if not PAPER_TRADING:
                 orderparams={"variety": "NORMAL", "tradingsymbol": pos['symbol'], "symboltoken": pos['token'], "transactiontype": "SELL", "exchange": "NFO", "ordertype": "MARKET", "producttype": PRODUCT_TYPE, "duration": "DAY", "price": "0", "quantity": str(LOT_SIZE)}
                 self.smartApi.placeOrder(orderparams)
-            ltp=self.get_ltp("NFO", pos['symbol'], pos['token']) or pos['entry']
+            ltp=self.get_ltp("NFO", pos['symbol'], pos['token']) if not PAPER_TRADING else pos['entry']
+            ltp=ltp or pos['entry']
             send_telegram(f"🔒 <b>CLOSED</b> {reason}\n{pos['symbol']}\nEntry:{pos['entry']} Exit:{ltp}\nSL:{pos['sl']} TP:{pos['tp']}\n{get_mode_text()}")
             self.active_pos=None
         except Exception as e: send_telegram(f"❌ Close Fail {e}")
