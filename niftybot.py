@@ -26,7 +26,7 @@ MPIN = os.getenv("ANGEL_MPIN") or os.getenv("MPIN")
 TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET") or os.getenv("TOTP_SECRET")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
+PAPER_TRADING = True  # ippo True, Monday False
 LOT_SIZE = 75
 PRODUCT_TYPE = "CARRYFORWARD"
 MAX_TRADES = 2
