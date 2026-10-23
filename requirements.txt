@@ -1,1 +1,3 @@
 smartapi-python==1.3.9
+pyotp
+requests
