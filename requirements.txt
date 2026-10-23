@@ -1,4 +1,7 @@
-Flask
 SmartApi-Python
 pyotp
 requests
+Flask
+logzero
+websocket-client
+pycryptodome
