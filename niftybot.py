@@ -131,21 +131,40 @@ class NiftyBot:
         return atm, 0.7
 
     def place_buy(self, strike, ce_pe):
-        # FINAL FIX: PAPER ku search illa - direct
         if PAPER_TRADING:
             symbol=f"NIFTY {strike} {ce_pe} (PAPER)"; token="99926000"
             logger.info(f"PAPER BUY {symbol}"); return symbol, token
         try:
-            keyword=f"NIFTY {strike} {ce_pe}"; search=search_scrip_safe(self.smartApi, "NFO", keyword)
-            symbol=None; token=None
-            if search and search.get('data'):
-                for item in search['data']:
-                    ts=item.get('tradingsymbol','')
-                    if str(strike) in ts and ce_pe in ts: symbol=ts; token=item.get('symboltoken'); break
-            if not symbol: return None, None
+            keyword=f"NIFTY {strike}"
+            search=search_scrip_safe(self.smartApi, "NFO", keyword)
+            if not search or not search.get('data'):
+                send_telegram(f"❌ Symbol not found NIFTY {strike} {ce_pe} - Search empty")
+                return None, None
+            
+            valid=[]
+            for item in search['data']:
+                ts=item.get('tradingsymbol','')
+                if str(strike) in ts and ce_pe in ts and 'NIFTY' in ts and 'BANK' not in ts:
+                    if 'CE' in ts or 'PE' in ts:
+                        valid.append(item)
+            
+            if not valid:
+                send_telegram(f"❌ Symbol not found NIFTY {strike} {ce_pe} - No match")
+                return None, None
+
+            valid.sort(key=lambda x: x.get('tradingsymbol',''))
+            best = valid[0]
+            symbol=best['tradingsymbol']
+            token=best['symboltoken']
+            
             orderparams={"variety": "NORMAL", "tradingsymbol": symbol, "symboltoken": token, "transactiontype": "BUY", "exchange": "NFO", "ordertype": "MARKET", "producttype": PRODUCT_TYPE, "duration": "DAY", "price": "0", "quantity": str(LOT_SIZE)}
-            self.smartApi.placeOrder(orderparams); return symbol, token
-        except: return None, None
+            self.smartApi.placeOrder(orderparams)
+            logger.info(f"LIVE BUY {symbol}")
+            return symbol, token
+        except Exception as e:
+            logger.error(f"place_buy {e}")
+            send_telegram(f"❌ Order Error {e}")
+            return None, None
 
     def close_position(self, reason):
         if not self.active_pos: return
@@ -155,7 +174,8 @@ class NiftyBot:
                 orderparams={"variety": "NORMAL", "tradingsymbol": pos['symbol'], "symboltoken": pos['token'], "transactiontype": "SELL", "exchange": "NFO", "ordertype": "MARKET", "producttype": PRODUCT_TYPE, "duration": "DAY", "price": "0", "quantity": str(LOT_SIZE)}
                 self.smartApi.placeOrder(orderparams)
             send_telegram(f"🔒 <b>CLOSED</b> {reason}\n{pos['symbol']}\nSL:{pos['sl']} TP:{pos['tp']}\n{get_mode_text()}"); self.active_pos=None
-        except: pass
+        except Exception as e:
+            logger.error(f"close {e}")
 
     def run(self):
         if not self.login(): return
@@ -165,12 +185,12 @@ class NiftyBot:
             try:
                 now=datetime.now(IST)
                 if now.date()!=self.last_date: self.orb_high=None; self.orb_low=None; self.trade_count=0; self.traded_today=False; self.active_pos=None; self.last_date=now.date()
-                # Market hours check - NO TRADE AFTER 3:15 and BEFORE 9:15
                 if now.hour<9 or (now.hour==15 and now.minute>=15) or now.hour>15:
                     if self.active_pos and now.hour==15 and now.minute>=15: self.close_position("3:15 Auto Square Off")
                     time.sleep(60); continue
                 if now.hour==9 and now.minute<15: time.sleep(10); continue
                 if self.orb_high is None and now.hour>=9: self.mark_orb_futures(); time.sleep(10); continue
+                
                 if self.active_pos:
                     from_str=now.strftime("%Y-%m-%d 09:15"); to_str=now.strftime("%Y-%m-%d %H:%M")
                     candles=self.get_candle_data("NSE", "99926000", "THREE_MINUTE", from_str, to_str)
@@ -183,25 +203,38 @@ class NiftyBot:
                         if close < self.active_pos['sl']: self.close_position(f"SL Hit PE {close} < {self.active_pos['sl']}")
                         elif close < self.active_pos['tp']: self.close_position(f"TP Hit PE {close} < {self.active_pos['tp']}")
                     time.sleep(30); continue
+
                 if self.orb_high is None or self.traded_today or self.trade_count>=MAX_TRADES: time.sleep(30); continue
                 from_str=now.strftime("%Y-%m-%d 09:15"); to_str=now.strftime("%Y-%m-%d %H:%M")
                 candles=self.get_candle_data("NSE", "99926000", "THREE_MINUTE", from_str, to_str)
                 if not candles or len(candles)<2: time.sleep(10); continue
                 close=float(candles[-1][4]); low=float(candles[-1][3]); high=float(candles[-1][2])
                 spot=self.get_ltp("NSE", "NIFTY", "99926000") or close
-                # Don't trade if market closed data repeating
+
                 if now.hour>=15 and now.minute>=15: time.sleep(60); continue
+                
                 if close > self.orb_high:
-                    strike, delta=self.find_delta_strike(spot, "CE"); sl=low; tp=close + ((close-low)*TP_RR) if (close-low)>0 else close+20
+                    strike, delta=self.find_delta_strike(spot, "CE")
+                    sl=low
+                    tp=close + ((close-sl)*TP_RR) if (close-sl)>0 else close+20
                     symbol, token=self.place_buy(strike, "CE")
-                    if symbol: self.active_pos={"symbol": symbol, "token": token, "entry": close, "sl": sl, "tp": tp, "type": "CE"}; send_telegram(f"🚀 <b>CE BREAKOUT</b> {get_mode_text()}\nORB H:{self.orb_high} > {close}\n{symbol} D:{delta:.2f}\nSL:{sl} TP:{tp:.1f}\n{self.trade_count+1}/{MAX_TRADES}"); self.trade_count+=1; 
-                    if self.trade_count>=MAX_TRADES: self.traded_today=True
+                    if symbol:
+                        self.active_pos={"symbol": symbol, "token": token, "entry": close, "sl": sl, "tp": tp, "type": "CE"}
+                        send_telegram(f"🚀 <b>CE BREAKOUT</b> {get_mode_text()}\nORB H:{self.orb_high} > {close}\n{symbol} D:{delta:.2f}\nSL:{sl} TP:{tp:.1f}\n{self.trade_count+1}/{MAX_TRADES}")
+                        self.trade_count+=1
+                        if self.trade_count>=MAX_TRADES: self.traded_today=True
                     time.sleep(60); continue
+                    
                 elif close < self.orb_low:
-                    strike, delta=self.find_delta_strike(spot, "PE"); sl=low; tp=close - ((high-close)*TP_RR) if (high-close)>0 else close-20
+                    strike, delta=self.find_delta_strike(spot, "PE")
+                    sl=low # ORIGINAL AS PER YOUR LOGIC - NOT CHANGED
+                    tp=close - ((high-close)*TP_RR) if (high-close)>0 else close-20
                     symbol, token=self.place_buy(strike, "PE")
-                    if symbol: self.active_pos={"symbol": symbol, "token": token, "entry": close, "sl": sl, "tp": tp, "type": "PE"}; send_telegram(f"🔻 <b>PE BREAKDOWN</b> {get_mode_text()}\nORB L:{self.orb_low} < {close}\n{symbol} D:{delta:.2f}\nSL:{sl} TP:{tp:.1f}\n{self.trade_count+1}/{MAX_TRADES}"); self.trade_count+=1;
-                    if self.trade_count>=MAX_TRADES: self.traded_today=True
+                    if symbol:
+                        self.active_pos={"symbol": symbol, "token": token, "entry": close, "sl": sl, "tp": tp, "type": "PE"}
+                        send_telegram(f"🔻 <b>PE BREAKDOWN</b> {get_mode_text()}\nORB L:{self.orb_low} < {close}\n{symbol} D:{delta:.2f}\nSL:{sl} TP:{tp:.1f}\n{self.trade_count+1}/{MAX_TRADES}")
+                        self.trade_count+=1
+                        if self.trade_count>=MAX_TRADES: self.traded_today=True
                     time.sleep(60); continue
                 time.sleep(30)
             except Exception as e: logger.error(f"Loop {e}"); time.sleep(10)
